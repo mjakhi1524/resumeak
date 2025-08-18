@@ -1,11 +1,14 @@
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
-import { LogOut, User } from "lucide-react";
+import { LogOut, User, Code } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useNavigate, useLocation } from "react-router-dom";
 
 const AppHeader = () => {
   const { user, signOut } = useAuth();
   const { toast } = useToast();
+  const navigate = useNavigate();
+  const location = useLocation();
 
   const handleSignOut = async () => {
     try {
@@ -37,6 +40,15 @@ const AppHeader = () => {
               <User className="w-4 h-4" />
               <span>{user.email}</span>
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate(location.pathname === '/developer' ? '/' : '/developer')}
+              className="flex items-center gap-2"
+            >
+              <Code className="w-4 h-4" />
+              {location.pathname === '/developer' ? 'Dashboard' : 'API'}
+            </Button>
             <Button
               variant="outline"
               size="sm"
