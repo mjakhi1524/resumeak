@@ -14,6 +14,80 @@ export type Database = {
   }
   public: {
     Tables: {
+      api_keys: {
+        Row: {
+          created_at: string
+          expires_at: string | null
+          id: string
+          is_active: boolean
+          key_hash: string
+          last_used_at: string | null
+          name: string
+          rate_limit_per_minute: number
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          is_active?: boolean
+          key_hash: string
+          last_used_at?: string | null
+          name: string
+          rate_limit_per_minute?: number
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          is_active?: boolean
+          key_hash?: string
+          last_used_at?: string | null
+          name?: string
+          rate_limit_per_minute?: number
+          user_id?: string | null
+        }
+        Relationships: []
+      }
+      api_usage: {
+        Row: {
+          api_key_id: string
+          endpoint: string
+          id: string
+          ip_address: string | null
+          response_time_ms: number | null
+          status_code: number | null
+          timestamp: string
+        }
+        Insert: {
+          api_key_id: string
+          endpoint: string
+          id?: string
+          ip_address?: string | null
+          response_time_ms?: number | null
+          status_code?: number | null
+          timestamp?: string
+        }
+        Update: {
+          api_key_id?: string
+          endpoint?: string
+          id?: string
+          ip_address?: string | null
+          response_time_ms?: number | null
+          status_code?: number | null
+          timestamp?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_usage_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       real_time_transfers: {
         Row: {
           amount: number
@@ -205,7 +279,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      generate_api_key: {
+        Args: Record<PropertyKey, never>
+        Returns: string
+      }
+      hash_api_key: {
+        Args: { api_key: string }
+        Returns: string
+      }
     }
     Enums: {
       [_ in never]: never
