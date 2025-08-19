@@ -7,9 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { Copy, Eye, EyeOff, Key, Trash2 } from "lucide-react";
+import { Copy, Eye, EyeOff, Key, Trash2, BookOpen, Code, Activity } from "lucide-react";
 import { toast } from "sonner";
 import { ApiDocumentation } from "@/components/ApiDocumentation";
+import { ApiKeyManager } from "@/components/developer/ApiKeyManager";
+import { ApiUsageDashboard } from "@/components/developer/ApiUsageDashboard";
 
 interface ApiKey {
   id: string;
@@ -167,170 +169,185 @@ export default function Developer() {
   }
 
   return (
-    <div className="container mx-auto py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold">Developer Portal</h1>
-        <p className="text-muted-foreground">Manage your API keys and access our wallet monitoring API</p>
+    <div className="min-h-screen bg-background">
+      {/* Header */}
+      <div className="border-b bg-card">
+        <div className="container mx-auto px-6 py-6">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="flex items-center gap-2">
+              <Code className="h-8 w-8 text-primary" />
+              <h1 className="text-3xl font-bold">API Reference</h1>
+            </div>
+          </div>
+          <p className="text-lg text-muted-foreground">
+            The Wallet Monitor API provides powerful tools for blockchain wallet analysis, balance tracking, and transaction monitoring.
+          </p>
+        </div>
       </div>
 
-      <Tabs defaultValue="keys" className="space-y-6">
-        <TabsList>
-          <TabsTrigger value="keys">API Keys</TabsTrigger>
-          <TabsTrigger value="usage">Usage</TabsTrigger>
-          <TabsTrigger value="docs">Documentation</TabsTrigger>
-        </TabsList>
+      {/* Main Content */}
+      <div className="container mx-auto px-6 py-8">
+        <Tabs defaultValue="overview" className="space-y-8">
+          <TabsList className="grid w-full grid-cols-4">
+            <TabsTrigger value="overview" className="flex items-center gap-2">
+              <BookOpen className="h-4 w-4" />
+              Overview
+            </TabsTrigger>
+            <TabsTrigger value="keys" className="flex items-center gap-2">
+              <Key className="h-4 w-4" />
+              API Keys
+            </TabsTrigger>
+            <TabsTrigger value="usage" className="flex items-center gap-2">
+              <Activity className="h-4 w-4" />
+              Usage
+            </TabsTrigger>
+            <TabsTrigger value="docs" className="flex items-center gap-2">
+              <Code className="h-4 w-4" />
+              Documentation
+            </TabsTrigger>
+          </TabsList>
 
-        <TabsContent value="keys" className="space-y-6">
-          {newApiKey && (
-            <Card className="border-green-200 bg-green-50">
-              <CardHeader>
-                <CardTitle className="text-green-800">API Key Created</CardTitle>
-                <CardDescription className="text-green-600">
-                  Copy this key now - you won't be able to see it again!
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center space-x-2">
-                  <Input
-                    value={showKey ? newApiKey : "wm_" + "•".repeat(40)}
-                    readOnly
-                    className="font-mono"
-                  />
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() => setShowKey(!showKey)}
-                  >
-                    {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() => copyToClipboard(newApiKey)}
-                  >
-                    <Copy className="h-4 w-4" />
-                  </Button>
-                </div>
-                <Button 
-                  variant="outline" 
-                  className="mt-4" 
-                  onClick={() => setNewApiKey(null)}
-                >
-                  Dismiss
-                </Button>
-              </CardContent>
-            </Card>
-          )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Create New API Key</CardTitle>
-              <CardDescription>
-                Generate a new API key to access our wallet monitoring endpoints
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div>
-                <Label htmlFor="keyName">Key Name</Label>
-                <Input
-                  id="keyName"
-                  placeholder="e.g., Production App, Development"
-                  value={newKeyName}
-                  onChange={(e) => setNewKeyName(e.target.value)}
-                />
-              </div>
-              <Button onClick={createApiKey} disabled={isCreating}>
-                <Key className="h-4 w-4 mr-2" />
-                {isCreating ? 'Creating...' : 'Create API Key'}
-              </Button>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Your API Keys</CardTitle>
-              <CardDescription>Manage your existing API keys</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {apiKeys.length === 0 ? (
-                <p className="text-muted-foreground">No API keys created yet</p>
-              ) : (
-                <div className="space-y-4">
-                  {apiKeys.map((key) => (
-                    <div key={key.id} className="flex items-center justify-between p-4 border rounded-lg">
-                      <div>
-                        <h4 className="font-medium">{key.name}</h4>
-                        <p className="text-sm text-muted-foreground">
-                          Created {new Date(key.created_at).toLocaleDateString()}
-                        </p>
-                        {key.last_used_at && (
-                          <p className="text-sm text-muted-foreground">
-                            Last used {new Date(key.last_used_at).toLocaleDateString()}
-                          </p>
-                        )}
-                        <div className="flex items-center space-x-2 mt-2">
-                          <Badge variant={key.is_active ? "default" : "secondary"}>
-                            {key.is_active ? "Active" : "Inactive"}
-                          </Badge>
-                          <Badge variant="outline">
-                            {key.rate_limit_per_minute} req/min
-                          </Badge>
-                        </div>
+          <TabsContent value="overview" className="space-y-8">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <Card className="lg:col-span-2">
+                <CardHeader>
+                  <CardTitle>Getting Started</CardTitle>
+                  <CardDescription>
+                    Learn how to integrate the Wallet Monitor API into your application
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="flex items-center justify-center w-6 h-6 rounded-full bg-primary text-primary-foreground text-sm font-medium">
+                        1
                       </div>
-                      <Button
-                        variant="destructive"
-                        size="icon"
-                        onClick={() => deleteApiKey(key.id)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="usage" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>API Usage</CardTitle>
-              <CardDescription>Monitor your API usage and performance</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {apiUsage.length === 0 ? (
-                <p className="text-muted-foreground">No API usage yet</p>
-              ) : (
-                <div className="space-y-2">
-                  {apiUsage.map((usage) => (
-                    <div key={usage.id} className="flex items-center justify-between p-3 border rounded">
                       <div>
-                        <span className="font-medium">{usage.endpoint}</span>
+                        <h4 className="font-medium">Create an API Key</h4>
                         <p className="text-sm text-muted-foreground">
-                          {new Date(usage.timestamp).toLocaleString()}
+                          Generate your first API key to authenticate requests
                         </p>
                       </div>
-                      <div className="flex items-center space-x-2">
-                        <Badge variant={usage.status_code < 400 ? "default" : "destructive"}>
-                          {usage.status_code}
-                        </Badge>
-                        <span className="text-sm text-muted-foreground">
-                          {usage.response_time_ms}ms
-                        </span>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <div className="flex items-center justify-center w-6 h-6 rounded-full bg-primary text-primary-foreground text-sm font-medium">
+                        2
+                      </div>
+                      <div>
+                        <h4 className="font-medium">Make Your First Request</h4>
+                        <p className="text-sm text-muted-foreground">
+                          Use your API key to call our wallet analysis endpoints
+                        </p>
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
+                    <div className="flex items-start gap-3">
+                      <div className="flex items-center justify-center w-6 h-6 rounded-full bg-primary text-primary-foreground text-sm font-medium">
+                        3
+                      </div>
+                      <div>
+                        <h4 className="font-medium">Build Your Application</h4>
+                        <p className="text-sm text-muted-foreground">
+                          Integrate real-time wallet monitoring into your app
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
 
-        <TabsContent value="docs">
-          <ApiDocumentation />
-        </TabsContent>
-      </Tabs>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Quick Start</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    <div>
+                      <h4 className="font-medium text-sm mb-2">Base URL</h4>
+                      <code className="text-xs bg-muted p-2 rounded block">
+                        https://tnwgnaneejkknokwpkwa.supabase.co/functions/v1
+                      </code>
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-sm mb-2">Authentication</h4>
+                      <code className="text-xs bg-muted p-2 rounded block">
+                        x-api-key: YOUR_API_KEY
+                      </code>
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-sm mb-2">Rate Limit</h4>
+                      <p className="text-xs text-muted-foreground">
+                        60 requests per minute
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Wallet Analysis</CardTitle>
+                  <CardDescription>
+                    Analyze wallet risk and transaction patterns
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Badge variant="outline" className="mb-2">POST</Badge>
+                  <code className="text-sm block mb-3">/api-analyze-wallet</code>
+                  <p className="text-sm text-muted-foreground">
+                    Get comprehensive risk analysis, transaction history, and wallet scoring.
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Wallet Balances</CardTitle>
+                  <CardDescription>
+                    Real-time balance tracking for multiple addresses
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Badge variant="outline" className="mb-2">POST</Badge>
+                  <code className="text-sm block mb-3">/api-wallet-balances</code>
+                  <p className="text-sm text-muted-foreground">
+                    Track native and token balances across different networks.
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Stablecoin Transfers</CardTitle>
+                  <CardDescription>
+                    Monitor recent stablecoin movements
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Badge variant="outline" className="mb-2">POST</Badge>
+                  <code className="text-sm block mb-3">/api-stablecoin-transfers</code>
+                  <p className="text-sm text-muted-foreground">
+                    Get real-time stablecoin transfer data with pagination.
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="keys">
+            <ApiKeyManager />
+          </TabsContent>
+
+          <TabsContent value="usage">
+            <ApiUsageDashboard />
+          </TabsContent>
+
+          <TabsContent value="docs">
+            <ApiDocumentation />
+          </TabsContent>
+        </Tabs>
+      </div>
     </div>
   );
 }
