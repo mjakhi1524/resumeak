@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -63,7 +63,7 @@ class RelayResponse(BaseModel):
 	status: Optional[str] = None
 
 
-app = FastAPI(title="Relay API", version="1.1.0")
+app = FastAPI(title="Relay API", version="1.2.0")
 
 
 def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=None)) -> str:
@@ -84,12 +84,37 @@ w3_clients: Dict[str, Web3] = {}
 def get_w3(chain: str) -> Web3:
 	key = chain.lower()
 	if key not in w3_clients:
-		env_name = {
+		# chain key → env var name
+		mapping = {
 			"ethereum": "RPC_URL_ETHEREUM",
+			"eth": "RPC_URL_ETHEREUM",
 			"polygon": "RPC_URL_POLYGON",
+			"matic": "RPC_URL_POLYGON",
 			"arbitrum": "RPC_URL_ARBITRUM",
+			"arb": "RPC_URL_ARBITRUM",
 			"optimism": "RPC_URL_OPTIMISM",
-		}.get(key, "RPC_URL_ETHEREUM")
+			"base": "RPC_URL_BASE",
+			"zksync": "RPC_URL_ZKSYNC",
+			"linea": "RPC_URL_LINEA",
+			"scroll": "RPC_URL_SCROLL",
+			"immutable": "RPC_URL_IMMUTABLE",
+			"taiko": "RPC_URL_TAIKO",
+			"bsc": "RPC_URL_BSC",
+			"binance-smart-chain": "RPC_URL_BSC",
+			"avalanche": "RPC_URL_AVALANCHE",
+			"avax": "RPC_URL_AVALANCHE",
+			"fantom": "RPC_URL_FANTOM",
+			"ftm": "RPC_URL_FANTOM",
+			"gnosis": "RPC_URL_GNOSIS",
+			"celo": "RPC_URL_CELO",
+			"moonbeam": "RPC_URL_MOONBEAM",
+			"aurora": "RPC_URL_AURORA",
+			"cronos": "RPC_URL_CRONOS",
+			"mantle": "RPC_URL_MANTLE",
+			"polygon-zkevm": "RPC_URL_POLYGON_ZKEVM",
+			"polygon_zkevm": "RPC_URL_POLYGON_ZKEVM",
+		}
+		env_name = mapping.get(key, "RPC_URL_ETHEREUM")
 		url = os.getenv(env_name)
 		if not url:
 			raise HTTPException(status_code=500, detail=f"Missing RPC URL for {key}")
@@ -105,50 +130,64 @@ async def startup_event() -> None:
 	await sanctions_checker.load_initial()
 
 
-def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureHitIn]]) -> tuple[Decision, List[str]]:
+def _apply_policy(sanctioned: bool, score: int, band: str) -> Tuple[bool, Optional[str], bool]:
+	"""Return (allowed, status, alert)
+	Policy:
+	- score==100 or sanctioned/PROHIBITED => block (status='blocked')
+	- score==50 => allow with alert (status='alert')
+	- score==0 => allow
+	- HIGH/CRITICAL (>=80) => block
+	- else allow
+	"""
+	if sanctioned or band == "PROHIBITED" or score >= 100:
+		return False, "blocked", False
+	if score == 50:
+		return True, "alert", True
+	if score == 0:
+		return True, None, False
+	if band in {"HIGH", "CRITICAL"} or score >= 80:
+		return False, "blocked", False
+	return True, None, False
+
+
+async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureHitIn]]) -> tuple[Decision, List[str], Optional[str]]:
 	"""If features provided: compute risk now; else fall back to DB cached risk.
-	Returns (Decision, reasons)
+	Returns (Decision, reasons, status)
 	"""
 	reasons: List[str] = []
-	sanctioned = await_sanction_check(to_addr)
+	sanctioned = await sanctions_checker.is_sanctioned(to_addr)
 	if features:
-		# compute from provided evidence
 		hits = [f.to_domain() for f in features]
 		score, band, reasons, applied = compute_risk_score(hits, sanctioned)
-		# persist evidence and score (best-effort)
 		try:
 			log_risk_events(to_addr, hits, applied)
 			upsert_risk_score(to_addr, score, band)
 		except Exception:
 			pass
-		allowed = not sanctioned and (band not in {"HIGH", "CRITICAL"}) and score < 80
-		decision = Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons)
-		return decision, reasons
+		allowed, status, alert = _apply_policy(sanctioned, score, band)
+		if alert:
+			reasons = ["ALERT: risk_score==50"] + reasons
+		return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
 	# fallback to DB snapshot
-	score, band = get_cached_risk(to_addr)
-	decision = decision_from(sanctioned, score, band)
-	return decision, decision.reasons
-
-
-def await_sanction_check(address: str) -> bool:
-	# small wrapper in case we later add caching; keep sync signature for main path
-	import asyncio
-	return asyncio.get_event_loop().run_until_complete(sanctions_checker.is_sanctioned(address))
-
-
-def get_cached_risk(address: str) -> tuple[int, str]:
 	sb = get_supabase()
-	res = sb.table("risk_scores").select("score,band").eq("wallet", (address or "").lower()).limit(1).execute()
+	res = sb.table("risk_scores").select("score,band").eq("wallet", (to_addr or "").lower()).limit(1).execute()
 	rows = res.data or []
-	if not rows:
-		return 0, "LOW"
-	data = rows[0]
-	return int(round(data.get("score") or 0)), data.get("band") or "LOW"
+	if rows:
+		data = rows[0]
+		score = int(round(data.get("score") or 0))
+		band = data.get("band") or "LOW"
+		allowed, status, alert = _apply_policy(sanctioned, score, band)
+		if alert:
+			reasons = ["ALERT: risk_score==50"]
+		return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
+	# no cached score → treat as 0
+	allowed, status, _ = _apply_policy(sanctioned, 0, "LOW")
+	return Decision(allowed=allowed, risk_band="LOW", risk_score=0, reasons=[]), [], status
 
 
 @app.post("/v1/check", response_model=Decision)
 async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_from_api_key)):
-	decision, reasons = make_decision_with_risk(body.to, body.features)
+	decision, reasons, status = await make_decision_with_risk(body.to, body.features)
 	# log (best-effort)
 	try:
 		sb = get_supabase()
@@ -160,7 +199,7 @@ async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_
 			"decision": "allowed" if decision.allowed else "blocked",
 			"risk_band": decision.risk_band,
 			"risk_score": decision.risk_score,
-			"reasons": reasons,
+			"reasons": reasons or decision.reasons,
 			"created_at": now_iso(),
 		}).execute()
 	except Exception:
@@ -177,7 +216,7 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 	if to is None:
 		raise HTTPException(status_code=400, detail="Missing 'to' in rawTx (contract creation not supported)")
 
-	decision, reasons = make_decision_with_risk(to, body.features)
+	decision, reasons, status = await make_decision_with_risk(to, body.features)
 
 	# pre-log
 	log_id: Optional[int] = None
@@ -191,7 +230,7 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 			"decision": "allowed" if decision.allowed else "blocked",
 			"risk_band": decision.risk_band,
 			"risk_score": decision.risk_score,
-			"reasons": reasons,
+			"reasons": reasons or decision.reasons,
 			"idempotency_key": body.idempotencyKey or None,
 			"created_at": now_iso(),
 		}).select("id").execute()
@@ -206,11 +245,11 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 			"allowed": False,
 			"risk_band": decision.risk_band,
 			"risk_score": decision.risk_score,
-			"reasons": reasons,
+			"reasons": reasons or decision.reasons,
 			"status": "blocked",
 		})
 
-	# broadcast
+	# broadcast (allowed or alert)
 	try:
 		w3 = get_w3(body.chain)
 		raw_bytes = Web3.to_bytes(hexstr=body.rawTx)
@@ -226,7 +265,8 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 			"risk_band": decision.risk_band,
 			"risk_score": decision.risk_score,
 			"txHash": tx_hex,
-			"reasons": reasons,
+			"reasons": reasons or decision.reasons,
+			"status": status,
 		})
 	except Exception as e:
 		raise HTTPException(status_code=502, detail=f"network_error: {e}")
