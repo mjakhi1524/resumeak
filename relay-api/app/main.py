@@ -47,7 +47,22 @@ class CheckRequest(BaseModel):
 	asset: Optional[str] = None
 	features: Optional[List[FeatureHitIn]] = None
 
-	model_config = ConfigDict(populate_by_name=True)
+	# Provide Swagger example so the UI is pre-filled with valid data
+	model_config = ConfigDict(
+		populate_by_name=True,
+		json_schema_extra={
+			"example": {
+				"chain": "ethereum",
+				"to": "0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6",
+				"from": "0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6",
+				"value": "1000000000000000000",
+				"asset": "ETH",
+				"features": [
+					{ "key": "value_gt_10k", "base": 10, "occurredAt": "2025-08-21T10:00:00Z" }
+				]
+			}
+		}
+	)
 
 
 class RelayRequest(BaseModel):
@@ -55,6 +70,17 @@ class RelayRequest(BaseModel):
 	rawTx: str
 	idempotencyKey: Optional[str] = None
 	features: Optional[List[FeatureHitIn]] = None
+
+	model_config = ConfigDict(
+		json_schema_extra={
+			"example": {
+				"chain": "ethereum",
+				"rawTx": "0x02f86b01843b9aca00847735940082520894b60e8dd61c5d32be8058bb8eb970870f07233155080c080a0...",
+				"idempotencyKey": "example-key-123",
+				"features": [ { "key": "value_gt_10k", "base": 10, "occurredAt": "2025-08-21T10:00:00Z" } ]
+			}
+		}
+	)
 
 
 class RelayResponse(BaseModel):
@@ -259,12 +285,17 @@ async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureH
 @app.post("/v1/check", response_model=Decision)
 async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_from_api_key)):
 	try:
-		# Validate request body
-		if not body.to or body.to == "string":
-			raise HTTPException(status_code=400, detail="Invalid 'to' address")
+		# Validate request body: accept 0x-prefixed 40-hex EVM address
+		if not body.to or not isinstance(body.to, str):
+			raise HTTPException(status_code=400, detail="Missing 'to' address")
+		to_norm = body.to.strip()
+		if to_norm.lower() == "string":
+			raise HTTPException(status_code=400, detail="Invalid 'to' address. Use a real 0x... address (see example in docs).")
+		if not (to_norm.startswith("0x") and len(to_norm) == 42):
+			raise HTTPException(status_code=400, detail="Invalid 'to' address format. Expected 0x-prefixed EVM address.")
 		
-		print(f"Processing check request for partner_id: {partner_id}, to: {body.to}")
-		decision, reasons, status = await make_decision_with_risk(body.to, body.features)
+		print(f"Processing check request for partner_id: {partner_id}, to: {to_norm}")
+		decision, reasons, status = await make_decision_with_risk(to_norm, body.features)
 		print(f"Decision: {decision.allowed}, risk_score: {decision.risk_score}, risk_band: {decision.risk_band}")
 		
 		# log (best-effort)
