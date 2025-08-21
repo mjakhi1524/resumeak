@@ -2,6 +2,7 @@ import os
 from typing import Optional, Dict, List, Any, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 from web3 import Web3
@@ -64,6 +65,18 @@ class RelayResponse(BaseModel):
 
 
 app = FastAPI(title="Relay API", version="1.2.0")
+
+# CORS for frontend
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://scan.stablepe.com")
+origins = [o.strip() for o in allowed_origins.split(",") if o.strip()]
+allow_credentials = os.getenv("ALLOW_CORS_CREDENTIALS", "false").lower() == "true"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 
 def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=None)) -> str:
