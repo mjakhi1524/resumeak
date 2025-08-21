@@ -1,9 +1,11 @@
 import os
 from typing import Optional, Dict, List, Any, Tuple
 
-from fastapi import FastAPI, Header, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Header, HTTPException, Depends, Security
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field, ConfigDict
 from web3 import Web3
 
@@ -64,7 +66,11 @@ class RelayResponse(BaseModel):
 	status: Optional[str] = None
 
 
-app = FastAPI(title="Relay API", version="1.2.0")
+app = FastAPI(
+    title="Relay API", 
+    version="1.2.0",
+    openapi_tags=[{"name": "default", "description": "Relay API endpoints"}]
+)
 
 # CORS for frontend
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://scan.stablepe.com")
@@ -78,18 +84,32 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+# Configure OpenAPI security scheme for Swagger UI
+app.openapi_schema = None  # Force regeneration
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version="3.0.2",
+        description="Relay API for blockchain risk assessment and transaction relay",
+        routes=app.routes,
+    )
+    # Add security scheme
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "API Key"
+        }
+    }
+    # Apply security to all endpoints
+    openapi_schema["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
 
-def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=None)) -> str:
-	if not authorization or not authorization.startswith("Bearer "):
-		raise HTTPException(status_code=401, detail="Missing API key")
-	api_key = authorization[7:]
-	sb = get_supabase()
-	res = sb.table("api_keys").select("partner_id,active").eq("key", api_key).limit(1).execute()
-	rows = res.data or []
-	row = rows[0] if rows else None
-	if not row or not row.get("active"):
-		raise HTTPException(status_code=403, detail="Invalid API key")
-	return str(row.get("partner_id"))
+app.openapi = custom_openapi
 
 
 w3_clients: Dict[str, Web3] = {}
@@ -136,6 +156,24 @@ def get_w3(chain: str) -> Web3:
 
 
 sanctions_checker = SanctionsChecker()
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=None)) -> str:
+	# Support both "Bearer <key>" and raw key in Authorization header,
+	# and also FastAPI HTTPBearer if configured later.
+	api_key = None
+	if authorization:
+		api_key = authorization[7:] if authorization.startswith("Bearer ") else authorization
+	if not api_key:
+		raise HTTPException(status_code=401, detail="Missing API key")
+	sb = get_supabase()
+	res = sb.table("api_keys").select("partner_id,active").eq("key", api_key).limit(1).execute()
+	rows = res.data or []
+	row = rows[0] if rows else None
+	if not row or not row.get("active"):
+		raise HTTPException(status_code=403, detail="Invalid API key")
+	return str(row.get("partner_id"))
 
 
 @app.on_event("startup")
