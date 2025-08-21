@@ -73,7 +73,7 @@ app = FastAPI(
 )
 
 # CORS for frontend
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://scan.stablepe.com")
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8080")
 origins = [o.strip() for o in allowed_origins.split(",") if o.strip()]
 allow_credentials = os.getenv("ALLOW_CORS_CREDENTIALS", "false").lower() == "true"
 app.add_middleware(
@@ -167,13 +167,33 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 		api_key = authorization[7:] if authorization.startswith("Bearer ") else authorization
 	if not api_key:
 		raise HTTPException(status_code=401, detail="Missing API key")
-	sb = get_supabase()
-	res = sb.table("api_keys").select("partner_id,active").eq("key", api_key).limit(1).execute()
-	rows = res.data or []
-	row = rows[0] if rows else None
-	if not row or not row.get("active"):
-		raise HTTPException(status_code=403, detail="Invalid API key")
-	return str(row.get("partner_id"))
+	
+	try:
+		sb = get_supabase()
+		# Try to find by key_hash first (primary storage), then by key (fallback)
+		res = sb.table("api_keys").select("partner_id,is_active").eq("key_hash", api_key).limit(1).execute()
+		rows = res.data or []
+		if not rows:
+			# Fallback to key column if key_hash not found
+			res = sb.table("api_keys").select("partner_id,is_active").eq("key", api_key).limit(1).execute()
+			rows = res.data or []
+		
+		row = rows[0] if rows else None
+		if not row:
+			raise HTTPException(status_code=403, detail="API key not found")
+		if not row.get("is_active"):
+			raise HTTPException(status_code=403, detail="API key is inactive")
+		
+		partner_id = row.get("partner_id")
+		if not partner_id:
+			raise HTTPException(status_code=500, detail="API key missing partner_id")
+		
+		return str(partner_id)
+	except HTTPException:
+		raise
+	except Exception as e:
+		print(f"Error validating API key: {e}")
+		raise HTTPException(status_code=500, detail="Internal server error during API key validation")
 
 
 @app.on_event("startup")
@@ -238,24 +258,38 @@ async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureH
 
 @app.post("/v1/check", response_model=Decision)
 async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_from_api_key)):
-	decision, reasons, status = await make_decision_with_risk(body.to, body.features)
-	# log (best-effort)
 	try:
-		sb = get_supabase()
-		sb.table("relay_logs").insert({
-			"partner_id": partner_id,
-			"chain": body.chain,
-			"from_addr": body.from_addr or None,
-			"to_addr": body.to,
-			"decision": "allowed" if decision.allowed else "blocked",
-			"risk_band": decision.risk_band,
-			"risk_score": decision.risk_score,
-			"reasons": reasons or decision.reasons,
-			"created_at": now_iso(),
-		}).execute()
-	except Exception:
-		pass
-	return JSONResponse(content=decision.model_dump())
+		# Validate request body
+		if not body.to or body.to == "string":
+			raise HTTPException(status_code=400, detail="Invalid 'to' address")
+		
+		print(f"Processing check request for partner_id: {partner_id}, to: {body.to}")
+		decision, reasons, status = await make_decision_with_risk(body.to, body.features)
+		print(f"Decision: {decision.allowed}, risk_score: {decision.risk_score}, risk_band: {decision.risk_band}")
+		
+		# log (best-effort)
+		try:
+			sb = get_supabase()
+			sb.table("relay_logs").insert({
+				"partner_id": partner_id,
+				"chain": body.chain,
+				"from_addr": body.from_addr or None,
+				"to_addr": body.to,
+				"decision": "allowed" if decision.allowed else "blocked",
+				"risk_band": decision.risk_band,
+				"risk_score": decision.risk_score,
+				"reasons": reasons or decision.reasons,
+				"created_at": now_iso(),
+			}).execute()
+		except Exception as e:
+			print(f"Warning: Failed to log request: {e}")
+		
+		return JSONResponse(content=decision.model_dump())
+	except HTTPException:
+		raise
+	except Exception as e:
+		print(f"Error in v1_check: {e}")
+		raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.post("/v1/relay", response_model=RelayResponse)
