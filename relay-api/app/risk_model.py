@@ -221,7 +221,7 @@ def compute_risk_score(hits: List[FeatureHit], sanctions_match: bool,
         category_config = RISK_CATEGORIES.get(category, RISK_CATEGORIES["BEHAVIORAL"])
         
         # Apply time decay
-        half_life = half_life_overrides.get(hit.key, category_config["half_life_days"])
+        half_life = (half_life_overrides or {}).get(hit.key, category_config["half_life_days"])
         decayed_weight = _decay(hit.base, hit.occurred_at, half_life)
         
         # Apply category-specific adjustments
