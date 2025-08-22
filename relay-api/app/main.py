@@ -247,37 +247,56 @@ def _apply_policy(sanctioned: bool, score: int, band: str) -> Tuple[bool, Option
 	return True, None, False
 
 
-async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureHitIn]]) -> tuple[Decision, List[str], Optional[str]]:
-	"""If features provided: compute risk now; else fall back to DB cached risk.
+async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureHitIn]], 
+                                 transaction_context: Optional[Dict] = None,
+                                 network_context: Optional[Dict] = None) -> tuple[Decision, List[str], Optional[str]]:
+	"""Enhanced risk assessment using the new enterprise risk model.
 	Returns (Decision, reasons, status)
 	"""
 	reasons: List[str] = []
 	sanctioned = await sanctions_checker.is_sanctioned(to_addr)
+	
 	if features:
+		# Convert features to domain objects
 		hits = [f.to_domain() for f in features]
-		score, band, reasons, applied = compute_risk_score(hits, sanctioned)
+		
+		# Use new risk model with context
+		score, band, reasons, applied = compute_risk_score(
+			hits, 
+			sanctioned,
+			transaction_context=transaction_context,
+			network_context=network_context
+		)
+		
 		try:
+			# Enhanced logging with new model
 			log_risk_events(to_addr, hits, applied)
-			upsert_risk_score(to_addr, score, band)
-		except Exception:
-			pass
+			upsert_risk_score(to_addr, score, band, reasons)
+		except Exception as e:
+			print(f"Warning: Failed to log risk data: {e}")
+		
 		allowed, status, alert = _apply_policy(sanctioned, score, band)
 		if alert:
 			reasons = ["ALERT: risk_score==50"] + reasons
 		return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
-	# fallback to DB snapshot
+	
+	# Fallback to DB snapshot
 	sb = get_supabase()
-	res = sb.table("risk_scores").select("score,band").eq("wallet", (to_addr or "").lower()).limit(1).execute()
+	res = sb.table("risk_scores").select("score,band,risk_factors").eq("wallet", (to_addr or "").lower()).limit(1).execute()
 	rows = res.data or []
+	
 	if rows:
 		data = rows[0]
 		score = int(round(data.get("score") or 0))
 		band = data.get("band") or "LOW"
+		reasons = data.get("risk_factors") or []
+		
 		allowed, status, alert = _apply_policy(sanctioned, score, band)
 		if alert:
-			reasons = ["ALERT: risk_score==50"]
+			reasons = ["ALERT: risk_score==50"] + reasons
 		return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
-	# no cached score → treat as 0
+	
+	# No cached score → treat as 0
 	allowed, status, _ = _apply_policy(sanctioned, 0, "LOW")
 	return Decision(allowed=allowed, risk_band="LOW", risk_score=0, reasons=[]), [], status
 
@@ -332,7 +351,22 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 	if to is None:
 		raise HTTPException(status_code=400, detail="Missing 'to' in rawTx (contract creation not supported)")
 
-	decision, reasons, status = await make_decision_with_risk(to, body.features)
+	# Extract transaction context for enhanced risk scoring
+	transaction_context = None
+	try:
+		# Parse raw transaction to get basic info
+		raw_bytes = Web3.to_bytes(hexstr=body.rawTx)
+		if len(raw_bytes) > 0:
+			# Basic transaction analysis
+			transaction_context = {
+				"data_size": len(raw_bytes),
+				"is_contract": len(raw_bytes) > 21000,  # More than basic ETH transfer
+				"raw_tx_length": len(body.rawTx)
+			}
+	except Exception as e:
+		print(f"Warning: Could not parse transaction context: {e}")
+	
+	decision, reasons, status = await make_decision_with_risk(to, body.features, transaction_context)
 
 	# pre-log
 	log_id: Optional[int] = None
