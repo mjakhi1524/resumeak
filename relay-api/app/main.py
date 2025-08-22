@@ -175,9 +175,19 @@ def get_w3(chain: str) -> Web3:
 		}
 		env_name = mapping.get(key, "RPC_URL_ETHEREUM")
 		url = os.getenv(env_name)
+		print(f"Getting RPC URL for chain '{key}', env var '{env_name}': {url[:50] if url else 'NOT SET'}...")
 		if not url:
-			raise HTTPException(status_code=500, detail=f"Missing RPC URL for {key}")
-		w3_clients[key] = Web3(Web3.HTTPProvider(url))
+			raise HTTPException(status_code=500, detail=f"Missing RPC URL for {key} (env var: {env_name})")
+		try:
+			w3_clients[key] = Web3(Web3.HTTPProvider(url))
+			# Test the connection
+			is_connected = w3_clients[key].is_connected()
+			print(f"Web3 connection test for {key}: {'SUCCESS' if is_connected else 'FAILED'}")
+			if not is_connected:
+				raise HTTPException(status_code=500, detail=f"Could not connect to RPC for {key}")
+		except Exception as e:
+			print(f"Error creating Web3 client for {key}: {e}")
+			raise HTTPException(status_code=500, detail=f"Failed to create Web3 client for {key}: {str(e)}")
 	return w3_clients[key]
 
 
@@ -401,15 +411,30 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 
 	# broadcast (allowed or alert)
 	try:
+		print(f"Attempting to broadcast transaction for chain: {body.chain}")
 		w3 = get_w3(body.chain)
+		print(f"Web3 instance created successfully")
+		
 		raw_bytes = Web3.to_bytes(hexstr=body.rawTx)
+		print(f"Raw transaction converted to bytes, length: {len(raw_bytes)}")
+		
+		# Try to decode the transaction first to validate it
+		try:
+			decoded_tx = w3.eth.account._sign_transaction._recover_transaction(body.rawTx)
+			print(f"Transaction decoded successfully, from: {decoded_tx['from']}, to: {decoded_tx['to']}, nonce: {decoded_tx['nonce']}")
+		except Exception as decode_error:
+			print(f"Warning: Could not decode transaction: {decode_error}")
+		
 		tx_hash = w3.eth.send_raw_transaction(raw_bytes)
+		print(f"Transaction broadcast successful, hash: {tx_hash}")
+		
 		tx_hex = tx_hash.hex() if hasattr(tx_hash, "hex") else Web3.to_hex(tx_hash)
 		if log_id is not None:
 			try:
 				sb.table("relay_logs").update({"tx_hash": tx_hex}).eq("id", log_id).execute()
-			except Exception:
-				pass
+			except Exception as log_error:
+				print(f"Warning: Failed to update log with tx_hash: {log_error}")
+		
 		return JSONResponse(content={
 			"allowed": True,
 			"risk_band": decision.risk_band,
@@ -419,4 +444,26 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 			"status": status,
 		})
 	except Exception as e:
-		raise HTTPException(status_code=502, detail=f"network_error: {e}")
+		print(f"Error broadcasting transaction: {e}")
+		print(f"Error type: {type(e)}")
+		print(f"Error args: {e.args}")
+		
+		# Check if it's a specific RPC error
+		if hasattr(e, 'args') and len(e.args) > 0:
+			error_msg = str(e.args[0])
+			if "insufficient funds" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="Insufficient funds for transaction")
+			elif "nonce too low" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="Nonce too low - transaction may already be mined")
+			elif "already known" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="Transaction already known to network")
+			elif "intrinsic gas too low" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="Gas limit too low for transaction")
+			elif "invalid sender" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="Invalid sender address")
+			elif "eip-155" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="EIP-155 replay protection mismatch")
+			else:
+				raise HTTPException(status_code=502, detail=f"RPC error: {error_msg}")
+		else:
+			raise HTTPException(status_code=502, detail=f"Network error: {str(e)}")
