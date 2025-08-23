@@ -321,8 +321,7 @@ def log_risk_events(wallet: str, hits: List[FeatureHit], applied: List[Tuple[str
             "feature": key,
             "details": hit.details or {},
             "weight_applied": weight_applied,
-            "timestamp": hit.occurred_at.isoformat(),
-            "category": next((cat for cat in RISK_CATEGORIES.keys() if key.startswith(cat)), "BEHAVIORAL")
+            "timestamp": hit.occurred_at.isoformat()
         })
     
     if rows:
@@ -340,10 +339,7 @@ def upsert_risk_score(wallet: str, score: int, band: str,
         data = {
             "wallet": wallet.lower(),
             "score": score,
-            "band": band,
-            "confidence": confidence,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-            "risk_factors": reasons or []
+            "band": band
         }
         sb.table("risk_scores").upsert(data).execute()
     except Exception as e:
@@ -372,9 +368,9 @@ def get_risk_profile(wallet: str) -> Optional[RiskProfile]:
             wallet=wallet.lower(),
             risk_score=score_data.get("score", 0),
             risk_band=score_data.get("band", "LOW"),
-            risk_factors=score_data.get("risk_factors", []),
-            confidence=score_data.get("confidence", 0.8),
-            last_updated=datetime.fromisoformat(score_data.get("last_updated", datetime.now(timezone.utc).isoformat())),
+            risk_factors=[],  # Not stored in current schema
+            confidence=0.8,  # Default confidence
+            last_updated=datetime.now(timezone.utc),  # Use current time
             transaction_count=0,  # Placeholder
             total_volume_usd=0.0,  # Placeholder
             suspicious_patterns=[]  # Placeholder
