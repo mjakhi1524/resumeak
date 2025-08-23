@@ -146,8 +146,8 @@ def get_w3(chain: str) -> Web3:
 		# chain key → env var name
 		mapping = {
 			"ethereum": "RPC_URL_ETHEREUM",
-			"sepolia": "RPC_URL",
 			"eth": "RPC_URL_ETHEREUM",
+			"sepolia": "RPC_URL_SEPOLIA",
 			"polygon": "RPC_URL_POLYGON",
 			"matic": "RPC_URL_POLYGON",
 			"arbitrum": "RPC_URL_ARBITRUM",
@@ -421,7 +421,8 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 		
 		# Try to decode the transaction first to validate it
 		try:
-			decoded_tx = w3.eth.account._sign_transaction._recover_transaction(body.rawTx)
+			from eth_account._utils.legacy_transactions import decode_transaction
+			decoded_tx = decode_transaction(body.rawTx)
 			print(f"Transaction decoded successfully, from: {decoded_tx['from']}, to: {decoded_tx['to']}, nonce: {decoded_tx['nonce']}")
 		except Exception as decode_error:
 			print(f"Warning: Could not decode transaction: {decode_error}")
@@ -464,8 +465,11 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 				raise HTTPException(status_code=400, detail="Invalid sender address")
 			elif "eip-155" in error_msg.lower():
 				raise HTTPException(status_code=400, detail="EIP-155 replay protection mismatch")
+			elif "gas price below minimum" in error_msg.lower() or "gas tip cap" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="Gas price too low - increase gas price or tip")
+			elif "chain not found" in error_msg.lower():
+				raise HTTPException(status_code=400, detail="Invalid chain specified - check chain parameter")
 			else:
 				raise HTTPException(status_code=502, detail=f"RPC error: {error_msg}")
 		else:
 			raise HTTPException(status_code=502, detail=f"Network error: {str(e)}")
-
