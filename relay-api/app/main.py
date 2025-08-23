@@ -146,6 +146,7 @@ def get_w3(chain: str) -> Web3:
 		# chain key → env var name
 		mapping = {
 			"ethereum": "RPC_URL_ETHEREUM",
+			"sepolia": "RPC_URL",
 			"eth": "RPC_URL_ETHEREUM",
 			"polygon": "RPC_URL_POLYGON",
 			"matic": "RPC_URL_POLYGON",
@@ -467,3 +468,4 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 				raise HTTPException(status_code=502, detail=f"RPC error: {error_msg}")
 		else:
 			raise HTTPException(status_code=502, detail=f"Network error: {str(e)}")
+
