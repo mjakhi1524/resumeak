@@ -184,19 +184,48 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 	if not api_key:
 		raise HTTPException(status_code=401, detail="Missing API key")
 	
+	print(f"Validating API key: {api_key[:10]}... (length: {len(api_key)})")
+	
 	try:
 		sb = get_supabase()
-		# Try to find by key_hash first (primary storage), then by key (fallback)
-		res = sb.table("api_keys").select("partner_id,is_active").eq("key_hash", api_key).limit(1).execute()
-		rows = res.data or []
-		if not rows:
-			# Fallback to key column if key_hash not found
-			res = sb.table("api_keys").select("partner_id,is_active").eq("key", api_key).limit(1).execute()
-			rows = res.data or []
 		
-		row = rows[0] if rows else None
-		if not row:
+		# The API key from frontend is the raw key (wm_XXXXXXXX format)
+		# We need to find it in the 'key' column, not the 'key_hash' column
+		
+		# First try to find by key column (this is what the frontend sends)
+		res = sb.table("api_keys").select("partner_id,is_active").eq("key", api_key).limit(1).execute()
+		rows = res.data or []
+		print(f"Search by key '{api_key}': found {len(rows)} rows")
+		
+		# If not found by key, try by key_hash as fallback
+		if not rows:
+			res = sb.table("api_keys").select("partner_id,is_active").eq("key_hash", api_key).limit(1).execute()
+			rows = res.data or []
+			print(f"Search by key_hash '{api_key}': found {len(rows)} rows")
+		
+		# If still not found, try case-insensitive search
+		if not rows:
+			# Get all API keys and search case-insensitively
+			all_keys = sb.table("api_keys").select("key,key_hash,partner_id,is_active").execute()
+			print(f"Total API keys in database: {len(all_keys.data or [])}")
+			
+			for key_record in all_keys.data or []:
+				if (key_record.get("key") and key_record.get("key").lower() == api_key.lower()) or \
+				   (key_record.get("key_hash") and key_record.get("key_hash").lower() == api_key.lower()):
+					rows = [key_record]
+					print(f"Found case-insensitive match: {key_record.get('key')} or {key_record.get('key_hash')}")
+					break
+		
+		if not rows:
+			print(f"API key '{api_key}' not found in database")
+			# Get some sample keys for debugging
+			sample_keys = sb.table("api_keys").select("key").limit(3).execute()
+			sample_data = sample_keys.data or []
+			if sample_data:
+				print(f"Sample keys in database: {[k.get('key', 'N/A')[:20] + '...' for k in sample_data]}")
 			raise HTTPException(status_code=403, detail="API key not found")
+		
+		row = rows[0]
 		if not row.get("is_active"):
 			raise HTTPException(status_code=403, detail="API key is inactive")
 		
@@ -204,6 +233,7 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 		if not partner_id:
 			raise HTTPException(status_code=500, detail="API key missing partner_id")
 		
+		print(f"API key validated successfully for partner_id: {partner_id}")
 		return str(partner_id)
 	except HTTPException:
 		raise
@@ -214,7 +244,34 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 
 @app.on_event("startup")
 async def startup_event() -> None:
+	print("=== RELAY API STARTUP ===")
+	
+	# Test Supabase connection
+	try:
+		sb = get_supabase()
+		print("✅ Supabase client created successfully")
+		
+		# Test database connection by checking api_keys table
+		res = sb.table("api_keys").select("id").limit(1).execute()
+		print(f"✅ Database connection test: {len(res.data or [])} rows found in api_keys table")
+		
+		# Check total API keys
+		all_keys = sb.table("api_keys").select("id,key,key_hash,partner_id,is_active").execute()
+		print(f"✅ Total API keys in database: {len(all_keys.data or [])}")
+		
+		# Show first few keys for debugging
+		for i, key_record in enumerate(all_keys.data or []):
+			if i < 3:  # Show first 3 keys
+				print(f"  Key {i+1}: {key_record.get('key', 'N/A')[:20]}... | Hash: {key_record.get('key_hash', 'N/A')[:20]}... | Partner: {key_record.get('partner_id', 'N/A')} | Active: {key_record.get('is_active', 'N/A')}")
+		
+	except Exception as e:
+		print(f"❌ Error during startup: {e}")
+		raise
+	
+	# Load sanctions checker
 	await sanctions_checker.load_initial()
+	print("✅ Sanctions checker loaded")
+	print("=== STARTUP COMPLETE ===")
 
 
 def _apply_policy(sanctioned: bool, score: int, band: str) -> Tuple[bool, Optional[str], bool]:
@@ -328,6 +385,35 @@ async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureH
 	return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
 
 
+@app.get("/test")
+async def test_endpoint():
+	"""Test endpoint to verify basic functionality"""
+	return {"message": "Relay API is running", "status": "ok"}
+
+@app.get("/debug/keys")
+async def debug_keys():
+	"""Debug endpoint to check API keys in database"""
+	try:
+		sb = get_supabase()
+		all_keys = sb.table("api_keys").select("id,key,key_hash,partner_id,is_active").execute()
+		
+		keys_info = []
+		for key_record in all_keys.data or []:
+			keys_info.append({
+				"id": str(key_record.get("id")),
+				"key": key_record.get("key", "N/A")[:20] + "..." if key_record.get("key") else "N/A",
+				"key_hash": key_record.get("key_hash", "N/A")[:20] + "..." if key_record.get("key_hash") else "N/A",
+				"partner_id": key_record.get("partner_id", "N/A"),
+				"is_active": key_record.get("is_active", "N/A")
+			})
+		
+		return {
+			"total_keys": len(keys_info),
+			"keys": keys_info
+		}
+	except Exception as e:
+		return {"error": str(e)}
+
 @app.post("/v1/check", response_model=Decision)
 async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_from_api_key)):
 	try:
@@ -344,24 +430,24 @@ async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_
 		decision, reasons, status = await make_decision_with_risk(to_norm, body.features)
 		print(f"Decision: {decision.allowed}, risk_score: {decision.risk_score}, risk_band: {decision.risk_band}")
 		
-		# log (best-effort)
-		try:
-			sb = get_supabase()
-			sb.table("relay_logs").insert({
-				"partner_id": partner_id,
-				"chain": body.chain,
-				"from_addr": body.from_addr or None,
-				"to_addr": body.to,
-				"decision": "allowed" if decision.allowed else "blocked",
-				"risk_band": decision.risk_band,
-				"risk_score": decision.risk_score,
-				"reasons": reasons or decision.reasons,
-				"created_at": now_iso(),
-			}).execute()
-		except Exception as e:
-			print(f"Warning: Failed to log request: {e}")
-		
-		return JSONResponse(content=decision.model_dump())
+	# log (best-effort)
+	try:
+		sb = get_supabase()
+		sb.table("relay_logs").insert({
+			"partner_id": partner_id,
+			"chain": body.chain,
+			"from_addr": body.from_addr or None,
+			"to_addr": body.to,
+			"decision": "allowed" if decision.allowed else "blocked",
+			"risk_band": decision.risk_band,
+			"risk_score": decision.risk_score,
+			"reasons": reasons or decision.reasons,
+			"created_at": now_iso(),
+		}).execute()
+	except Exception as e:
+		print(f"Warning: Failed to log request: {e}")
+	
+	return JSONResponse(content=decision.model_dump())
 	except HTTPException:
 		raise
 	except Exception as e:
