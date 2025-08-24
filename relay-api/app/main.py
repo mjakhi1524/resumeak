@@ -141,16 +141,37 @@ app.openapi = custom_openapi
 w3_clients: Dict[str, Web3] = {}
 
 def get_w3(chain: str) -> Web3:
-	"""Get or create Web3 client for the specified chain"""
 	key = chain.lower()
 	if key not in w3_clients:
-		# Map chain names to environment variable names
+		# chain key → env var name
 		mapping = {
 			"ethereum": "RPC_URL_ETHEREUM",
+			"eth": "RPC_URL_ETHEREUM",
+			"sepolia": "RPC_URL_SEPOLIA",
 			"polygon": "RPC_URL_POLYGON",
+			"matic": "RPC_URL_POLYGON",
 			"arbitrum": "RPC_URL_ARBITRUM",
+			"arb": "RPC_URL_ARBITRUM",
 			"optimism": "RPC_URL_OPTIMISM",
 			"base": "RPC_URL_BASE",
+			"zksync": "RPC_URL_ZKSYNC",
+			"linea": "RPC_URL_LINEA",
+			"scroll": "RPC_URL_SCROLL",
+			"immutable": "RPC_URL_IMMUTABLE",
+			"taiko": "RPC_URL_TAIKO",
+			"bsc": "RPC_URL_BSC",
+			"binance-smart-chain": "RPC_URL_BSC",
+			"avalanche": "RPC_URL_AVALANCHE",
+			"avax": "RPC_URL_AVALANCHE",
+			"fantom": "RPC_URL_FANTOM",
+			"ftm": "RPC_URL_FANTOM",
+			"gnosis": "RPC_URL_GNOSIS",
+			"celo": "RPC_URL_CELO",
+			"moonbeam": "RPC_URL_MOONBEAM",
+			"aurora": "RPC_URL_AURORA",
+			"cronos": "RPC_URL_CRONOS",
+			"mantle": "RPC_URL_MANTLE",
+			"polygon-zkevm": "RPC_URL_POLYGON_ZKEVM",
 			"polygon_zkevm": "RPC_URL_POLYGON_ZKEVM",
 		}
 		env_name = mapping.get(key, "RPC_URL_ETHEREUM")
@@ -184,48 +205,19 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 	if not api_key:
 		raise HTTPException(status_code=401, detail="Missing API key")
 	
-	print(f"Validating API key: {api_key[:10]}... (length: {len(api_key)})")
-	
 	try:
 		sb = get_supabase()
-		
-		# The API key from frontend is the raw key (wm_XXXXXXXX format)
-		# We need to find it in the 'key' column, not the 'key_hash' column
-		
-		# First try to find by key column (this is what the frontend sends)
-		res = sb.table("api_keys").select("partner_id,is_active").eq("key", api_key).limit(1).execute()
+		# Try to find by key_hash first (primary storage), then by key (fallback)
+		res = sb.table("api_keys").select("partner_id,is_active").eq("key_hash", api_key).limit(1).execute()
 		rows = res.data or []
-		print(f"Search by key '{api_key}': found {len(rows)} rows")
-		
-		# If not found by key, try by key_hash as fallback
 		if not rows:
-			res = sb.table("api_keys").select("partner_id,is_active").eq("key_hash", api_key).limit(1).execute()
+			# Fallback to key column if key_hash not found
+			res = sb.table("api_keys").select("partner_id,is_active").eq("key", api_key).limit(1).execute()
 			rows = res.data or []
-			print(f"Search by key_hash '{api_key}': found {len(rows)} rows")
 		
-		# If still not found, try case-insensitive search
-		if not rows:
-			# Get all API keys and search case-insensitively
-			all_keys = sb.table("api_keys").select("key,key_hash,partner_id,is_active").execute()
-			print(f"Total API keys in database: {len(all_keys.data or [])}")
-			
-			for key_record in all_keys.data or []:
-				if (key_record.get("key") and key_record.get("key").lower() == api_key.lower()) or \
-				   (key_record.get("key_hash") and key_record.get("key_hash").lower() == api_key.lower()):
-					rows = [key_record]
-					print(f"Found case-insensitive match: {key_record.get('key')} or {key_record.get('key_hash')}")
-					break
-		
-		if not rows:
-			print(f"API key '{api_key}' not found in database")
-			# Get some sample keys for debugging
-			sample_keys = sb.table("api_keys").select("key").limit(3).execute()
-			sample_data = sample_keys.data or []
-			if sample_data:
-				print(f"Sample keys in database: {[k.get('key', 'N/A')[:20] + '...' for k in sample_data]}")
+		row = rows[0] if rows else None
+		if not row:
 			raise HTTPException(status_code=403, detail="API key not found")
-		
-		row = rows[0]
 		if not row.get("is_active"):
 			raise HTTPException(status_code=403, detail="API key is inactive")
 		
@@ -233,7 +225,6 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 		if not partner_id:
 			raise HTTPException(status_code=500, detail="API key missing partner_id")
 		
-		print(f"API key validated successfully for partner_id: {partner_id}")
 		return str(partner_id)
 	except HTTPException:
 		raise
@@ -244,34 +235,7 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 
 @app.on_event("startup")
 async def startup_event() -> None:
-	print("=== RELAY API STARTUP ===")
-	
-	# Test Supabase connection
-	try:
-		sb = get_supabase()
-		print("✅ Supabase client created successfully")
-		
-		# Test database connection by checking api_keys table
-		res = sb.table("api_keys").select("id").limit(1).execute()
-		print(f"✅ Database connection test: {len(res.data or [])} rows found in api_keys table")
-		
-		# Check total API keys
-		all_keys = sb.table("api_keys").select("id,key,key_hash,partner_id,is_active").execute()
-		print(f"✅ Total API keys in database: {len(all_keys.data or [])}")
-		
-		# Show first few keys for debugging
-		for i, key_record in enumerate(all_keys.data or []):
-			if i < 3:  # Show first 3 keys
-				print(f"  Key {i+1}: {key_record.get('key', 'N/A')[:20]}... | Hash: {key_record.get('key_hash', 'N/A')[:20]}... | Partner: {key_record.get('partner_id', 'N/A')} | Active: {key_record.get('is_active', 'N/A')}")
-		
-	except Exception as e:
-		print(f"❌ Error during startup: {e}")
-		raise
-	
-	# Load sanctions checker
 	await sanctions_checker.load_initial()
-	print("✅ Sanctions checker loaded")
-	print("=== STARTUP COMPLETE ===")
 
 
 def _apply_policy(sanctioned: bool, score: int, band: str) -> Tuple[bool, Optional[str], bool]:
@@ -302,13 +266,10 @@ async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureH
 	"""
 	reasons: List[str] = []
 	sanctioned = await sanctions_checker.is_sanctioned(to_addr)
-	print(f"Sanctions check for {to_addr}: {sanctioned}")
 	
-	# Always compute fresh risk score instead of relying on cached values
 	if features:
 		# Convert features to domain objects
 		hits = [f.to_domain() for f in features]
-		print(f"Processing {len(hits)} risk features for {to_addr}")
 		
 		# Use new risk model with context
 		score, band, reasons, applied = compute_risk_score(
@@ -328,91 +289,28 @@ async def make_decision_with_risk(to_addr: str, features: Optional[List[FeatureH
 		allowed, status, alert = _apply_policy(sanctioned, score, band)
 		if alert:
 			reasons = ["ALERT: risk_score==50"] + reasons
-		print(f"Risk assessment for {to_addr}: score={score}, band={band}, allowed={allowed}")
 		return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
 	
-	# No features provided - compute basic risk score based on sanctions and transaction context
-	print(f"No risk features provided for {to_addr}, computing basic risk score")
+	# Fallback to DB snapshot
+	sb = get_supabase()
+	res = sb.table("risk_scores").select("score,band,risk_factors").eq("wallet", (to_addr or "").lower()).limit(1).execute()
+	rows = res.data or []
 	
-	# Create basic risk features based on available context
-	basic_features = []
-	
-	# Add sanctions as a critical feature if applicable
-	if sanctioned:
-		from datetime import datetime, timezone
-		basic_features.append(FeatureHit(
-			key="SANCTIONS",
-			base=100.0,
-			occurred_at=datetime.now(timezone.utc),
-			critical=True,
-			details={"address": to_addr, "source": "sanctioned_wallets_table"}
-		))
-	
-	# Add transaction context risk if available
-	if transaction_context:
-		data_size = transaction_context.get('data_size', 0)
-		is_contract = transaction_context.get('is_contract', False)
+	if rows:
+		data = rows[0]
+		score = int(round(data.get("score") or 0))
+		band = data.get("band") or "LOW"
+		reasons = data.get("risk_factors") or []
 		
-		if is_contract:
-			from datetime import datetime, timezone
-			basic_features.append(FeatureHit(
-				key="CONTRACT_INTERACTION",
-				base=50.0,
-				occurred_at=datetime.now(timezone.utc),
-				critical=False,
-				details={"data_size": data_size, "is_contract": True}
-			))
+		allowed, status, alert = _apply_policy(sanctioned, score, band)
+		if alert:
+			reasons = ["ALERT: risk_score==50"] + reasons
+		return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
 	
-	# Compute risk score with basic features
-	if basic_features:
-		score, band, reasons, applied = compute_risk_score(
-			basic_features,
-			sanctioned,
-			transaction_context=transaction_context,
-			network_context=network_context
-		)
-	else:
-		# No features at all - base score on sanctions only
-		score = 100 if sanctioned else 0
-		band = "PROHIBITED" if sanctioned else "LOW"
-		reasons = ["SANCTIONS: Address found in sanctioned wallets list"] if sanctioned else []
-	
-	allowed, status, alert = _apply_policy(sanctioned, score, band)
-	if alert:
-		reasons = ["ALERT: risk_score==50"] + reasons
-	
-	print(f"Basic risk assessment for {to_addr}: score={score}, band={band}, allowed={allowed}, reasons={reasons}")
-	return Decision(allowed=allowed, risk_band=band, risk_score=score, reasons=reasons), reasons, status
+	# No cached score → treat as 0
+	allowed, status, _ = _apply_policy(sanctioned, 0, "LOW")
+	return Decision(allowed=allowed, risk_band="LOW", risk_score=0, reasons=[]), [], status
 
-
-@app.get("/test")
-async def test_endpoint():
-	"""Test endpoint to verify basic functionality"""
-	return {"message": "Relay API is running", "status": "ok"}
-
-@app.get("/debug/keys")
-async def debug_keys():
-	"""Debug endpoint to check API keys in database"""
-	try:
-		sb = get_supabase()
-		all_keys = sb.table("api_keys").select("id,key,key_hash,partner_id,is_active").execute()
-		
-		keys_info = []
-		for key_record in all_keys.data or []:
-			keys_info.append({
-				"id": str(key_record.get("id")),
-				"key": key_record.get("key", "N/A")[:20] + "..." if key_record.get("key") else "N/A",
-				"key_hash": key_record.get("key_hash", "N/A")[:20] + "..." if key_record.get("key_hash") else "N/A",
-				"partner_id": key_record.get("partner_id", "N/A"),
-				"is_active": key_record.get("is_active", "N/A")
-			})
-		
-		return {
-			"total_keys": len(keys_info),
-			"keys": keys_info
-		}
-	except Exception as e:
-		return {"error": str(e)}
 
 @app.post("/v1/check", response_model=Decision)
 async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_from_api_key)):
@@ -430,24 +328,24 @@ async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_
 		decision, reasons, status = await make_decision_with_risk(to_norm, body.features)
 		print(f"Decision: {decision.allowed}, risk_score: {decision.risk_score}, risk_band: {decision.risk_band}")
 		
-	# log (best-effort)
-	try:
-		sb = get_supabase()
-		sb.table("relay_logs").insert({
-			"partner_id": partner_id,
-			"chain": body.chain,
-			"from_addr": body.from_addr or None,
-			"to_addr": body.to,
-			"decision": "allowed" if decision.allowed else "blocked",
-			"risk_band": decision.risk_band,
-			"risk_score": decision.risk_score,
-			"reasons": reasons or decision.reasons,
-			"created_at": now_iso(),
-		}).execute()
-	except Exception as e:
-		print(f"Warning: Failed to log request: {e}")
-	
-	return JSONResponse(content=decision.model_dump())
+		# log (best-effort)
+		try:
+			sb = get_supabase()
+			sb.table("relay_logs").insert({
+				"partner_id": partner_id,
+				"chain": body.chain,
+				"from_addr": body.from_addr or None,
+				"to_addr": body.to,
+				"decision": "allowed" if decision.allowed else "blocked",
+				"risk_band": decision.risk_band,
+				"risk_score": decision.risk_score,
+				"reasons": reasons or decision.reasons,
+				"created_at": now_iso(),
+			}).execute()
+		except Exception as e:
+			print(f"Warning: Failed to log request: {e}")
+		
+		return JSONResponse(content=decision.model_dump())
 	except HTTPException:
 		raise
 	except Exception as e:
@@ -457,20 +355,12 @@ async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_
 
 @app.post("/v1/relay", response_model=RelayResponse)
 async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_from_api_key)):
-	print(f"=== RELAY REQUEST START ===")
-	print(f"Partner ID: {partner_id}")
-	print(f"Chain: {body.chain}")
-	print(f"Raw TX length: {len(body.rawTx)}")
-	print(f"Features provided: {len(body.features) if body.features else 0}")
-	
 	if not is_hex_string(body.rawTx):
 		raise HTTPException(status_code=400, detail="rawTx must be 0x-hex string")
 
 	to = extract_to_address(body.rawTx)
 	if to is None:
 		raise HTTPException(status_code=400, detail="Missing 'to' in rawTx (contract creation not supported)")
-	
-	print(f"Extracted 'to' address: {to}")
 
 	# Extract transaction context for enhanced risk scoring
 	transaction_context = None
@@ -484,13 +374,10 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 				"is_contract": len(raw_bytes) > 21000,  # More than basic ETH transfer
 				"raw_tx_length": len(body.rawTx)
 			}
-			print(f"Transaction context: {transaction_context}")
 	except Exception as e:
 		print(f"Warning: Could not parse transaction context: {e}")
 	
-	print(f"Calling make_decision_with_risk for address: {to}")
 	decision, reasons, status = await make_decision_with_risk(to, body.features, transaction_context)
-	print(f"Risk decision: allowed={decision.allowed}, score={decision.risk_score}, band={decision.risk_band}, reasons={reasons}")
 
 	# pre-log
 	log_id: Optional[int] = None
@@ -515,7 +402,6 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 		pass
 
 	if not decision.allowed:
-		print(f"Transaction BLOCKED for {to}: {reasons}")
 		return JSONResponse(status_code=403, content={
 			"allowed": False,
 			"risk_band": decision.risk_band,
@@ -524,7 +410,6 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 			"status": "blocked",
 		})
 
-	print(f"Transaction ALLOWED for {to}, proceeding to broadcast...")
 	# broadcast (allowed or alert)
 	try:
 		print(f"Attempting to broadcast transaction for chain: {body.chain}")
@@ -552,7 +437,6 @@ async def v1_relay(body: RelayRequest, partner_id: str = Depends(get_partner_id_
 			except Exception as log_error:
 				print(f"Warning: Failed to update log with tx_hash: {log_error}")
 		
-		print(f"=== RELAY REQUEST SUCCESS ===")
 		return JSONResponse(content={
 			"allowed": True,
 			"risk_band": decision.risk_band,
