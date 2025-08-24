@@ -141,37 +141,16 @@ app.openapi = custom_openapi
 w3_clients: Dict[str, Web3] = {}
 
 def get_w3(chain: str) -> Web3:
+	"""Get or create Web3 client for the specified chain"""
 	key = chain.lower()
 	if key not in w3_clients:
-		# chain key → env var name
+		# Map chain names to environment variable names
 		mapping = {
 			"ethereum": "RPC_URL_ETHEREUM",
-			"eth": "RPC_URL_ETHEREUM",
-			"sepolia": "RPC_URL_SEPOLIA",
 			"polygon": "RPC_URL_POLYGON",
-			"matic": "RPC_URL_POLYGON",
 			"arbitrum": "RPC_URL_ARBITRUM",
-			"arb": "RPC_URL_ARBITRUM",
 			"optimism": "RPC_URL_OPTIMISM",
 			"base": "RPC_URL_BASE",
-			"zksync": "RPC_URL_ZKSYNC",
-			"linea": "RPC_URL_LINEA",
-			"scroll": "RPC_URL_SCROLL",
-			"immutable": "RPC_URL_IMMUTABLE",
-			"taiko": "RPC_URL_TAIKO",
-			"bsc": "RPC_URL_BSC",
-			"binance-smart-chain": "RPC_URL_BSC",
-			"avalanche": "RPC_URL_AVALANCHE",
-			"avax": "RPC_URL_AVALANCHE",
-			"fantom": "RPC_URL_FANTOM",
-			"ftm": "RPC_URL_FANTOM",
-			"gnosis": "RPC_URL_GNOSIS",
-			"celo": "RPC_URL_CELO",
-			"moonbeam": "RPC_URL_MOONBEAM",
-			"aurora": "RPC_URL_AURORA",
-			"cronos": "RPC_URL_CRONOS",
-			"mantle": "RPC_URL_MANTLE",
-			"polygon-zkevm": "RPC_URL_POLYGON_ZKEVM",
 			"polygon_zkevm": "RPC_URL_POLYGON_ZKEVM",
 		}
 		env_name = mapping.get(key, "RPC_URL_ETHEREUM")
@@ -180,7 +159,7 @@ def get_w3(chain: str) -> Web3:
 		if not url:
 			raise HTTPException(status_code=500, detail=f"Missing RPC URL for {key} (env var: {env_name})")
 		try:
-		w3_clients[key] = Web3(Web3.HTTPProvider(url))
+			w3_clients[key] = Web3(Web3.HTTPProvider(url))
 			# Test the connection
 			is_connected = w3_clients[key].is_connected()
 			print(f"Web3 connection test for {key}: {'SUCCESS' if is_connected else 'FAILED'}")
@@ -206,16 +185,16 @@ def get_partner_id_from_api_key(authorization: Optional[str] = Header(default=No
 		raise HTTPException(status_code=401, detail="Missing API key")
 	
 	try:
-	sb = get_supabase()
+		sb = get_supabase()
 		# Try to find by key_hash first (primary storage), then by key (fallback)
 		res = sb.table("api_keys").select("partner_id,is_active").eq("key_hash", api_key).limit(1).execute()
 		rows = res.data or []
 		if not rows:
 			# Fallback to key column if key_hash not found
 			res = sb.table("api_keys").select("partner_id,is_active").eq("key", api_key).limit(1).execute()
-	rows = res.data or []
+			rows = res.data or []
 		
-	row = rows[0] if rows else None
+		row = rows[0] if rows else None
 		if not row:
 			raise HTTPException(status_code=403, detail="API key not found")
 		if not row.get("is_active"):
@@ -365,24 +344,24 @@ async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_
 		decision, reasons, status = await make_decision_with_risk(to_norm, body.features)
 		print(f"Decision: {decision.allowed}, risk_score: {decision.risk_score}, risk_band: {decision.risk_band}")
 		
-	# log (best-effort)
-	try:
-		sb = get_supabase()
-		sb.table("relay_logs").insert({
-			"partner_id": partner_id,
-			"chain": body.chain,
-			"from_addr": body.from_addr or None,
-			"to_addr": body.to,
-			"decision": "allowed" if decision.allowed else "blocked",
-			"risk_band": decision.risk_band,
-			"risk_score": decision.risk_score,
-			"reasons": reasons or decision.reasons,
-			"created_at": now_iso(),
-		}).execute()
+		# log (best-effort)
+		try:
+			sb = get_supabase()
+			sb.table("relay_logs").insert({
+				"partner_id": partner_id,
+				"chain": body.chain,
+				"from_addr": body.from_addr or None,
+				"to_addr": body.to,
+				"decision": "allowed" if decision.allowed else "blocked",
+				"risk_band": decision.risk_band,
+				"risk_score": decision.risk_score,
+				"reasons": reasons or decision.reasons,
+				"created_at": now_iso(),
+			}).execute()
 		except Exception as e:
 			print(f"Warning: Failed to log request: {e}")
 		
-	return JSONResponse(content=decision.model_dump())
+		return JSONResponse(content=decision.model_dump())
 	except HTTPException:
 		raise
 	except Exception as e:
