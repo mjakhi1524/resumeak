@@ -1,9 +1,10 @@
+
 import os
 import logging
 import httpx
 from typing import Optional, Dict, List, Any, Tuple
 
-from fastapi import FastAPI, Header, HTTPException, Depends, Security
+from fastapi import FastAPI, Header, HTTPException, Depends, Security, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -80,6 +81,7 @@ class RelayRequest(BaseModel):
 	rawTx: str
 	idempotencyKey: Optional[str] = None
 	features: Optional[List[FeatureHitIn]] = None
+	user_geo: Optional[Dict[str, Any]] = Field(default=None, description="End-user geolocation data from client-side")
 
 	model_config = ConfigDict(
 		json_schema_extra={
@@ -87,7 +89,8 @@ class RelayRequest(BaseModel):
 				"chain": "ethereum",
 				"rawTx": "0x02f86b01843b9aca00847735940082520894b60e8dd61c5d32be8058bb8eb970870f07233155080c080a0...",
 				"idempotencyKey": "example-key-123",
-				"features": [ { "key": "value_gt_10k", "base": 10, "occurredAt": "2025-08-21T10:00:00Z" } ]
+				"features": [ { "key": "value_gt_10k", "base": 10, "occurredAt": "2025-08-21T10:00:00Z" } ],
+				"user_geo": { "country_code": "US", "country": "United States", "continent_code": "NA", "continent": "North America" }
 			}
 		}
 	)
@@ -182,6 +185,208 @@ w3_clients: Dict[str, Web3] = {}
 wallet_risk_assessor = WalletRiskAssessor()
 audit_logger = SanctionsAuditLogger()
 
+ERC20_MIN_ABI = [
+	{
+		"constant": True,
+		"inputs": [],
+		"name": "symbol",
+		"outputs": [{"name": "", "type": "string"}],
+		"type": "function",
+	},
+	{
+		"constant": True,
+		"inputs": [],
+		"name": "decimals",
+		"outputs": [{"name": "", "type": "uint8"}],
+		"type": "function",
+	},
+]
+
+def _normalize_chain_name(chain: str) -> str:
+	key = (chain or "").lower()
+	mapping = {
+		"eth": "ethereum",
+		"ethereum": "ethereum",
+		"sepolia": "sepolia",
+		"matic": "polygon",
+		"polygon": "polygon",
+		"arb": "arbitrum",
+		"arbitrum": "arbitrum",
+		"optimism": "optimism",
+		"base": "base",
+		"bsc": "bsc",
+		"binance-smart-chain": "bsc",
+		"avax": "avalanche",
+		"avalanche": "avalanche",
+	}
+	return mapping.get(key, key or "ethereum")
+
+def _decode_native_and_token_amounts(raw_tx_hex: str, chain: str) -> tuple[Optional[float], Optional[str]]:
+	"""Best-effort decode of amount and currency from signed raw tx.
+
+	Returns (amount, currency). For native transfers currency will be chain native (e.g., ETH).
+	For ERC-20, currency will be token symbol if retrievable; otherwise 'ERC20'.
+	"""
+	amount: Optional[float] = None
+	currency: Optional[str] = None
+	# 1) Try to decode tx (legacy first, then typed/EIP-1559) to get 'value' and 'data'
+	decoded = None
+	input_data = None
+	# Legacy decoder
+	try:
+		from eth_account._utils.legacy_transactions import decode_transaction as decode_legacy
+		decoded = decode_legacy(raw_tx_hex)
+	except Exception:
+		decoded = None
+	# Typed decoder fallback
+	if decoded is None:
+		try:
+			from eth_account._utils.typed_transactions import decode_transaction as decode_typed
+			decoded = decode_typed(raw_tx_hex)
+		except Exception:
+			decoded = None
+	# Extract input and value
+	try:
+		if decoded:
+			input_data = decoded.get("data") or decoded.get("input")
+			value_wei = decoded.get("value")
+			if value_wei is not None:
+				amount = float(Web3.from_wei(int(value_wei), "ether"))
+				# currency will be assigned below based on chain mapping if not ERC20
+	except Exception:
+		pass
+
+	# 2) If input data indicates ERC-20 transfer, parse and fetch token metadata
+	try:
+		if not input_data and isinstance(raw_tx_hex, str) and raw_tx_hex.startswith("0x"):
+			# For some decoders, legacy 'data' may not be filled; we cannot RLP here easily
+			pass
+		if input_data and isinstance(input_data, (bytes, bytearray)):
+			input_hex = Web3.to_hex(input_data)
+		elif isinstance(input_data, str):
+			input_hex = input_data
+		else:
+			input_hex = None
+		# Detect ERC-20 function selectors
+		if input_hex and input_hex.startswith("0x") and len(input_hex) >= 10:
+			selector = input_hex[:10]
+			# transfer(address,uint256)
+			if selector == "0xa9059cbb" and len(input_hex) >= 10 + 64 * 2:
+				amount_hex = input_hex[10 + 64 : 10 + 128]
+				amount_int = int(amount_hex, 16)
+				# Query token metadata from 'to' contract
+				try:
+					w3 = get_w3(chain)
+					# We need the contract address. For contract call, 'to' is the token address; if we failed earlier, leave symbol unknown
+					# Attempt to extract to address from raw tx using existing helper
+					token_addr = extract_to_address(raw_tx_hex)
+					if token_addr:
+						contract = w3.eth.contract(address=Web3.to_checksum_address(token_addr), abi=ERC20_MIN_ABI)
+						decimals = int(contract.functions.decimals().call())
+						try:
+							symbol = contract.functions.symbol().call()
+						except Exception:
+							symbol = "ERC20"
+						if decimals >= 0:
+							amount = float(amount_int / (10 ** decimals))
+							currency = symbol or "ERC20"
+				except Exception:
+					# Fallback if token metadata not retrievable
+					if amount_int > 0 and amount is None:
+						amount = float(amount_int)
+						currency = "ERC20"
+			# transferFrom(address,address,uint256)
+			elif selector == "0x23b872dd" and len(input_hex) >= 10 + 64 * 3:
+				amount_hex = input_hex[10 + 64 * 2 : 10 + 64 * 3]
+				amount_int = int(amount_hex, 16)
+				try:
+					w3 = get_w3(chain)
+					token_addr = extract_to_address(raw_tx_hex)
+					if token_addr:
+						contract = w3.eth.contract(address=Web3.to_checksum_address(token_addr), abi=ERC20_MIN_ABI)
+						decimals = int(contract.functions.decimals().call())
+						try:
+							symbol = contract.functions.symbol().call()
+						except Exception:
+							symbol = "ERC20"
+						if decimals >= 0:
+							amount = float(amount_int / (10 ** decimals))
+							currency = symbol or "ERC20"
+				except Exception:
+					if amount_int > 0 and amount is None:
+						amount = float(amount_int)
+						currency = "ERC20"
+	except Exception:
+		pass
+
+	# Default currency label for known native chains if amount present and currency not set
+	if amount is not None and not currency:
+		native_by_chain = {
+			"ethereum": "ETH",
+			"sepolia": "ETH",
+			"polygon": "MATIC",
+			"polygon-zkevm": "ETH",
+			"polygon_zkevm": "ETH",
+			"arbitrum": "ETH",
+			"optimism": "ETH",
+			"base": "ETH",
+			"bsc": "BNB",
+			"avalanche": "AVAX",
+			"fantom": "FTM",
+			"gnosis": "xDAI",
+			"celo": "CELO",
+			"moonbeam": "GLMR",
+			"aurora": "ETH",
+			"cronos": "CRO",
+			"mantle": "MNT",
+			"linea": "ETH",
+			"scroll": "ETH",
+			"immutable": "ETH",
+			"taiko": "ETH",
+			"zksync": "ETH",
+		}
+		currency = native_by_chain.get(_normalize_chain_name(chain), "ETH")
+
+	return amount, currency
+
+def _extract_tx_from_and_gas(raw_tx_hex: str) -> tuple[Optional[str], Optional[int], Optional[int]]:
+	"""Extract from_address, gas_limit, and gas_price_wei (best-effort) from raw tx.
+
+	Returns (from_address, gas_limit, gas_price_wei).
+	"""
+	from_address: Optional[str] = None
+	gas_limit: Optional[int] = None
+	gas_price_wei: Optional[int] = None
+
+	decoded = None
+	# Try legacy first
+	try:
+		from eth_account._utils.legacy_transactions import decode_transaction as decode_legacy
+		decoded = decode_legacy(raw_tx_hex)
+	except Exception:
+		decoded = None
+	# Fallback to typed/EIP-1559
+	if decoded is None:
+		try:
+			from eth_account._utils.typed_transactions import decode_transaction as decode_typed
+			decoded = decode_typed(raw_tx_hex)
+		except Exception:
+			decoded = None
+
+	try:
+		if decoded:
+			from_address = decoded.get("from") or decoded.get("sender")
+			gas_limit = decoded.get("gas") or decoded.get("gasLimit")
+			gp = decoded.get("gasPrice")
+			if gp is None:
+				gp = decoded.get("maxFeePerGas") or decoded.get("max_fee_per_gas")
+			if gp is not None:
+				gas_price_wei = int(gp)
+	except Exception:
+		pass
+
+	return from_address, gas_limit, gas_price_wei
+
 def get_w3(chain: str) -> Web3:
 	key = chain.lower()
 	if key not in w3_clients:
@@ -237,6 +442,47 @@ def get_w3(chain: str) -> Web3:
 sanctions_checker = local_sanctions_checker
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+async def get_geo_data(client_ip: str) -> Optional[Dict[str, Any]]:
+	"""Get geolocation data from IPinfo Lite API"""
+	ipinfo_token = os.getenv("IPINFO_TOKEN")
+	if not ipinfo_token:
+		print("Warning: IPINFO_TOKEN not set, skipping geo lookup")
+		return None
+	
+	try:
+		async with httpx.AsyncClient() as client:
+			response = await client.get(
+				f"https://api.ipinfo.io/lite/{client_ip}?token={ipinfo_token}",
+				timeout=3.0
+			)
+			if response.status_code == 200:
+				return response.json()
+			else:
+				print(f"Warning: IPinfo API failed with status {response.status_code}")
+				return None
+	except Exception as e:
+		print(f"Warning: Failed to get geo data: {e}")
+		return None
+
+def get_real_client_ip(request: Request) -> str:
+	"""Extract real client IP from request headers (handles proxies/CDNs)"""
+	# Check for forwarded headers (common in production)
+	forwarded_for = request.headers.get("X-Forwarded-For")
+	if forwarded_for:
+		# X-Forwarded-For can contain multiple IPs, take the first one
+		return forwarded_for.split(",")[0].strip()
+	
+	real_ip = request.headers.get("X-Real-IP")
+	if real_ip:
+		return real_ip.strip()
+	
+	cf_connecting_ip = request.headers.get("CF-Connecting-IP")  # Cloudflare
+	if cf_connecting_ip:
+		return cf_connecting_ip.strip()
+	
+	# Fallback to direct client IP
+	return request.client.host if request.client else "unknown"
 
 async def call_webhook(transaction_data: Dict[str, Any], api_key: str) -> None:
 	"""Call the main app's webhook to log transaction data"""
@@ -495,8 +741,15 @@ async def v1_check(body: CheckRequest, partner_id: str = Depends(get_partner_id_
 
 
 @app.post("/v1/relay", response_model=RelayResponse)
-async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depends(get_partner_id_and_api_key)):
+async def v1_relay(body: RelayRequest, request: Request, partner_and_key: tuple[str, str] = Depends(get_partner_id_and_api_key)):
 	partner_id, api_key = partner_and_key
+	
+	# Capture real client IP (handles proxies/CDNs) for geolocation
+	client_ip = get_real_client_ip(request)
+	api_caller_geo = await get_geo_data(client_ip)
+	
+	# Priority: 1) user_geo (if user implements it), 2) real client IP geo (fallback)
+	geo_data = body.user_geo if body.user_geo else api_caller_geo
 	
 	if not is_hex_string(body.rawTx):
 		raise HTTPException(status_code=400, detail="rawTx must be 0x-hex string")
@@ -505,7 +758,8 @@ async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depend
 	if to is None:
 		raise HTTPException(status_code=400, detail="Missing 'to' in rawTx (contract creation not supported)")
 
-	# Extract transaction context for enhanced risk scoring
+	# Normalize chain and extract transaction context for enhanced risk scoring
+	chain_normalized = _normalize_chain_name(body.chain)
 	transaction_context = None
 	try:
 		# Parse raw transaction to get basic info
@@ -519,6 +773,16 @@ async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depend
 			}
 	except Exception as e:
 		print(f"Warning: Could not parse transaction context: {e}")
+
+	# Extract amounts (native or ERC-20) best-effort
+	amount_value, amount_currency = _decode_native_and_token_amounts(body.rawTx, chain_normalized)
+	from_address, gas_limit, gas_price_wei = _extract_tx_from_and_gas(body.rawTx)
+	gas_price_gwei: Optional[float] = None
+	try:
+		if gas_price_wei is not None:
+			gas_price_gwei = float(Web3.from_wei(int(gas_price_wei), "gwei"))
+	except Exception:
+		gas_price_gwei = None
 	
 	# Check sanctions first and log clearly
 	is_sanctioned = sanctions_checker.is_sanctioned(to)
@@ -536,7 +800,7 @@ async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depend
 	try:
 		ins = sb.table("relay_logs").insert({
 			"partner_id": partner_id,
-			"chain": body.chain,
+			"chain": chain_normalized,
 			"from_addr": None,
 			"to_addr": to,
 			"decision": "allowed" if decision.allowed else "blocked",
@@ -556,16 +820,24 @@ async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depend
 		# Send blocked transaction data to webhook
 		webhook_data = {
 			"partner_id": partner_id,
-			"from_address": None,
+			"from_address": from_address,
 			"to_address": to,
-			"amount": 0,
-			"currency": "ETH",
-			"blockchain": body.chain,
+			"amount": amount_value or 0,
+			"currency": amount_currency or "ETH",
+			"blockchain": chain_normalized,
 			"tx_hash": None,
 			"status": "blocked",
 			"risk_level": decision.risk_band,
 			"risk_score": decision.risk_score,
-			"description": f"Transaction blocked: {', '.join(reasons or decision.reasons)}"
+			"description": f"Transaction blocked: {', '.join(reasons or decision.reasons)}",
+			"client_ip": client_ip,
+			"geo_data": geo_data,
+			"gas_price": gas_price_gwei,
+			"gas_limit": gas_limit,
+			"transaction_size": (transaction_context or {}).get("data_size"),
+			"is_contract_interaction": (transaction_context or {}).get("is_contract", False),
+			"idempotency_key": body.idempotencyKey,
+			"raw_tx_data": body.rawTx
 		}
 		
 		# Call webhook (non-blocking)
@@ -585,8 +857,8 @@ async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depend
 
 	# broadcast (allowed or alert)
 	try:
-		print(f"Attempting to broadcast transaction for chain: {body.chain}")
-		w3 = get_w3(body.chain)
+		print(f"Attempting to broadcast transaction for chain: {chain_normalized}")
+		w3 = get_w3(chain_normalized)
 		print(f"Web3 instance created successfully")
 		
 		raw_bytes = Web3.to_bytes(hexstr=body.rawTx)
@@ -613,16 +885,24 @@ async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depend
 		# Send successful transaction data to webhook
 		webhook_data = {
 			"partner_id": partner_id,
-			"from_address": None,
+			"from_address": from_address,
 			"to_address": to,
-			"amount": 0,
-			"currency": "ETH",
-			"blockchain": body.chain,
+			"amount": amount_value or 0,
+			"currency": amount_currency or "ETH",
+			"blockchain": chain_normalized,
 			"tx_hash": tx_hex,
 			"status": "completed",
 			"risk_level": decision.risk_band,
 			"risk_score": decision.risk_score,
-			"description": f"Transaction completed successfully via relay API"
+			"description": f"Transaction completed successfully via relay API",
+			"client_ip": client_ip,
+			"geo_data": geo_data,
+			"gas_price": gas_price_gwei,
+			"gas_limit": gas_limit,
+			"transaction_size": (transaction_context or {}).get("data_size"),
+			"is_contract_interaction": (transaction_context or {}).get("is_contract", False),
+			"idempotency_key": body.idempotencyKey,
+			"raw_tx_data": body.rawTx
 		}
 		
 		# Call webhook (non-blocking)
@@ -660,7 +940,7 @@ async def v1_relay(body: RelayRequest, partner_and_key: tuple[str, str] = Depend
 			detail = "Gas price too low for current network conditions"
 		elif "chain not found" in error_detail.lower():
 			status_code = 400
-			detail = f"Chain '{body.chain}' not supported or RPC not configured"
+			detail = f"Chain '{chain_normalized}' not supported or RPC not configured"
 		else:
 			status_code = 500
 			detail = f"Transaction broadcast failed: {error_detail}"
